@@ -1,0 +1,15 @@
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+.serena/
+
+# 作業用（インストーラー、publish の出力）
+.work/
+
+# リリースのトークン（.env.example を写して使う。コミットしない）
+.env
+
+# Python のキャッシュ（.claude/skills の補助スクリプト）
+__pycache__/

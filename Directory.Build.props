@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <Version>0.1.1</Version>
+    <Product>Leaflet</Product>
+    <Authors>toru</Authors>
+    <Copyright>Copyright © 2026 toru</Copyright>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

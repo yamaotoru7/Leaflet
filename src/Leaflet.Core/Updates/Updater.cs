@@ -1,0 +1,277 @@
+using System.Diagnostics;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text.Json;
+
+namespace Leaflet.Core.Updates;
+
+/// <summary>
+/// A published release that the updater can install: its installer and the .sha256 written by build-installer.ps1.
+/// Each asset has two addresses: its download URL on github.com and its API URL, used when the first fails.
+/// </summary>
+public sealed record ReleaseInfo(Version Version, string Tag, string Notes, string PageUrl,
+    string InstallerName, string InstallerUrl, string ChecksumUrl, string InstallerApiUrl = "", string ChecksumApiUrl = "");
+
+/// <summary>
+/// Checks the public GitHub releases (no sign-in) and downloads a newer installer.
+/// Whether this copy is the installed one and starting the installer are left to the app.
+/// </summary>
+public static class Updater
+{
+    public const string ProductName = "Leaflet";
+    public const string Repository = "yamaotoru7/Leaflet";
+    public const string ReleasesPage = "https://github.com/" + Repository + "/releases";
+    public static readonly TimeSpan Interval = TimeSpan.FromDays(1);
+
+    private const string LatestApi = "https://api.github.com/repos/" + Repository + "/releases/latest";
+    private const string ReleasesApi = "https://api.github.com/repos/" + Repository + "/releases?per_page=100";
+
+    private static readonly HttpClient Http = CreateClient();
+
+    /// <summary>The download gives up when no data arrives for this long (settable for tests).</summary>
+    public static TimeSpan StallTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>The version of this build (Directory.Build.props), as major.minor.patch.</summary>
+    public static Version CurrentVersion
+    {
+        get
+        {
+            var v = typeof(Updater).Assembly.GetName().Version ?? new Version(0, 0, 0);
+            return new Version(v.Major, v.Minor, Math.Max(v.Build, 0));
+        }
+    }
+
+    public static bool IsDue(DateTimeOffset? lastCheck, DateTimeOffset now) => lastCheck is not { } last || now - last >= Interval;
+
+    public static bool IsNewer(ReleaseInfo release, Version current) => release.Version > current;
+
+    /// <summary>The latest release, or null when nothing installable is published yet.</summary>
+    public static async Task<ReleaseInfo?> GetLatestAsync(CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, LatestApi);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        using var response = await Http.SendAsync(request, ct);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+        response.EnsureSuccessStatusCode();
+        using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+        return Parse(json.RootElement);
+    }
+
+    /// <summary>
+    /// The latest release with its notes replaced by those of every release after <paramref name="current"/> up to it,
+    /// newest first, so skipping versions does not hide what changed in between. When the list cannot be read,
+    /// the latest release's own notes are kept.
+    /// </summary>
+    public static async Task<ReleaseInfo> WithNotesSinceAsync(ReleaseInfo latest, Version current, CancellationToken ct)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, ReleasesApi);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            using var response = await Http.SendAsync(request, ct);
+            response.EnsureSuccessStatusCode();
+            using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            if (json.RootElement.ValueKind != JsonValueKind.Array) return latest;
+            var notes = json.RootElement.EnumerateArray().Select(ParseNotes).OfType<(Version, string)>().ToList();
+            return latest with { Notes = CombineNotes(notes, latest, current) };
+        }
+        catch (Exception error) when (error is HttpRequestException or IOException or OperationCanceledException or JsonException)
+        {
+            Trace.TraceWarning($"途中の版のリリースノートを読めませんでした。 {error.Message}");
+            return latest;
+        }
+    }
+
+    /// <summary>
+    /// Notes of the releases in (current, latest], newest first, each under a "## &lt;version&gt;" heading
+    /// (its own "Leaflet &lt;version&gt;。" line is dropped). One release keeps its notes as they are.
+    /// </summary>
+    public static string CombineNotes(IEnumerable<(Version Version, string Notes)> releases, ReleaseInfo latest, Version current)
+    {
+        var picked = releases.Where(r => r.Version > current && r.Version < latest.Version)
+            .Append((latest.Version, latest.Notes))
+            .GroupBy(r => r.Version).Select(g => g.Last())
+            .OrderByDescending(r => r.Version).ToList();
+        if (picked.Count == 1) return latest.Notes;
+        return string.Join("\n\n", picked.Select(r =>
+        {
+            var lines = r.Notes.Split('\n').ToList();
+            if (lines.Count > 0 && lines[0].Trim().TrimEnd('。', '.') == $"{ProductName} {r.Version}") lines.RemoveAt(0);
+            var body = string.Join("\n", lines).Trim();
+            return body.Length > 0 ? $"## {r.Version}\n\n{body}" : $"## {r.Version}";
+        }));
+    }
+
+    /// <summary>A published release's version and notes (no installer needed: only its notes are shown).</summary>
+    public static (Version Version, string Notes)? ParseNotes(JsonElement release)
+    {
+        if (release.ValueKind != JsonValueKind.Object || Bool(release, "draft") || Bool(release, "prerelease")) return null;
+        if (!Version.TryParse(Text(release, "tag_name").TrimStart('v', 'V'), out var version)) return null;
+        return (version, Text(release, "body").Replace("\r\n", "\n").Trim());
+    }
+
+    /// <summary>
+    /// GitHub's release JSON → ReleaseInfo. Drafts, pre-releases, unreadable tags and releases without
+    /// the installer and its .sha256 are skipped.
+    /// </summary>
+    public static ReleaseInfo? Parse(JsonElement release)
+    {
+        if (Bool(release, "draft") || Bool(release, "prerelease")) return null;
+        var tag = Text(release, "tag_name");
+        if (!Version.TryParse(tag.TrimStart('v', 'V'), out var version)) return null;
+        var assets = new Dictionary<string, (string Download, string Api)>(StringComparer.OrdinalIgnoreCase);
+        if (release.TryGetProperty("assets", out var list) && list.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var asset in list.EnumerateArray()) assets[Text(asset, "name")] = (Text(asset, "browser_download_url"), Text(asset, "url"));
+        }
+        // The name becomes the file name in the download folder: it must not be a path.
+        var installer = assets.Keys.FirstOrDefault(n => n.EndsWith("-setup.exe", StringComparison.OrdinalIgnoreCase)
+            && n == Path.GetFileName(n) && n.IndexOfAny(Path.GetInvalidFileNameChars()) < 0);
+        if (installer is null || !assets.TryGetValue(installer + ".sha256", out var checksum)) return null;
+        return new ReleaseInfo(version, tag, Text(release, "body").Replace("\r\n", "\n").Trim(), Text(release, "html_url"),
+            installer, assets[installer].Download, checksum.Download, assets[installer].Api, checksum.Api);
+    }
+
+    public static string DownloadRoot => Path.Combine(Path.GetTempPath(), "Leaflet-update");
+
+    /// <summary>
+    /// Downloads the installer into a folder of its own under %TEMP% and checks it against the published .sha256.
+    /// On failure nothing is left behind; folders of earlier attempts are removed after a day
+    /// (the installer started from one may still be running sooner).
+    /// </summary>
+    public static async Task<string> DownloadAsync(ReleaseInfo release, IProgress<double> progress, CancellationToken ct)
+    {
+        RemoveOldDownloads();
+        // One folder per attempt: another instance updating at the same time cannot
+        // overwrite this file between its check and its start.
+        var directory = Path.Combine(DownloadRoot, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            return await DownloadIntoAsync(release, Path.Combine(directory, release.InstallerName), progress, ct);
+        }
+        catch
+        {
+            TryDelete(directory);
+            throw;
+        }
+    }
+
+    private static async Task<string> DownloadIntoAsync(ReleaseInfo release, string path, IProgress<double> progress, CancellationToken ct)
+    {
+        string expected;
+        using (var checksum = await GetAssetAsync(release.ChecksumUrl, release.ChecksumApiUrl, HttpCompletionOption.ResponseContentRead, ct))
+        {
+            expected = (await checksum.Content.ReadAsStringAsync(ct)).Trim().Split((char[]?)null, 2)[0].ToLowerInvariant();
+        }
+        if (expected.Length != 64) throw new InvalidDataException($"{release.InstallerName}.sha256 を読めませんでした。");
+
+        // HttpClient.Timeout stops at the headers (ResponseHeadersRead), so a body that
+        // stops arriving is caught by this timer, restarted whenever data comes in.
+        using var stall = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        stall.CancelAfter(StallTimeout);
+        try
+        {
+            using var response = await GetAssetAsync(release.InstallerUrl, release.InstallerApiUrl, HttpCompletionOption.ResponseHeadersRead, stall.Token);
+            var total = response.Content.Headers.ContentLength;
+            await using var source = await response.Content.ReadAsStreamAsync(stall.Token);
+            await using var target = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            var buffer = new byte[81920];
+            long done = 0;
+            int read;
+            while ((read = await source.ReadAsync(buffer, stall.Token)) > 0)
+            {
+                stall.CancelAfter(StallTimeout);
+                await target.WriteAsync(buffer.AsMemory(0, read), ct);
+                done += read;
+                if (total > 0) progress.Report((double)done / total.Value);
+            }
+        }
+        catch (OperationCanceledException error) when (!ct.IsCancellationRequested)
+        {
+            throw new IOException($"{release.InstallerName} のダウンロードが {StallTimeout.TotalSeconds:0} 秒間進みませんでした。", error);
+        }
+
+        string actual;
+        await using (var file = File.OpenRead(path))
+        {
+            actual = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct));
+        }
+        if (actual != expected) throw new InvalidDataException("ダウンロードしたインストーラーのハッシュが一致しません。");
+        return path;
+    }
+
+    /// <summary>
+    /// A successful response for a release asset. The github.com download URL has failed for anonymous
+    /// clients (504 from every edge) while the same file came through the API, so a failure there is
+    /// retried once through the asset's API URL.
+    /// </summary>
+    private static async Task<HttpResponseMessage> GetAssetAsync(string url, string apiUrl, HttpCompletionOption completion, CancellationToken ct)
+    {
+        if (apiUrl.Length > 0)
+        {
+            try
+            {
+                var response = await Http.GetAsync(url, completion, ct);
+                if (response.IsSuccessStatusCode) return response;
+                Trace.TraceWarning($"{url} は {(int)response.StatusCode} でした。API から取り直します。");
+                response.Dispose();
+            }
+            catch (HttpRequestException error)
+            {
+                Trace.TraceWarning($"{url} を取得できませんでした。API から取り直します。 {error.Message}");
+            }
+        }
+        var api = apiUrl.Length > 0;
+        using var request = new HttpRequestMessage(HttpMethod.Get, api ? apiUrl : url);
+        // The API returns the asset's metadata unless the file itself is asked for.
+        if (api) request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream"));
+        var result = await Http.SendAsync(request, completion, ct);
+        try
+        {
+            result.EnsureSuccessStatusCode();
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+    }
+
+    private static void RemoveOldDownloads()
+    {
+        if (!Directory.Exists(DownloadRoot)) return;
+        var cutoff = DateTime.UtcNow - TimeSpan.FromDays(1);
+        foreach (var entry in new DirectoryInfo(DownloadRoot).EnumerateFileSystemInfos())
+        {
+            if (entry is FileInfo || entry.LastWriteTimeUtc < cutoff) TryDelete(entry.FullName);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, true);
+            else File.Delete(path);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            Trace.TraceWarning($"更新用の一時ファイルを消せませんでした。 {path} {error.Message}");
+        }
+    }
+
+    private static HttpClient CreateClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue(ProductName, CurrentVersion.ToString()));
+        return client;
+    }
+
+    private static string Text(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    private static bool Bool(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+}

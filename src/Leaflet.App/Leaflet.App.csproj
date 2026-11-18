@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Leaflet.Core\Leaflet.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>Leaflet</AssemblyName>
+    <RootNamespace>Leaflet.App</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationIcon>Assets\Leaflet.ico</ApplicationIcon>
+  </PropertyGroup>
+
+
+  <ItemGroup>
+    <Resource Include="Assets\Leaflet.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../../THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- A self-contained publish (the installer) ships the .NET runtime: include its license and notices. -->
+  <Target Name="IncludeRuntimeLicenses" AfterTargets="ResolveFrameworkReferences" Condition="'$(SelfContained)' == 'true'">
+    <PropertyGroup>
+      <NetCoreRuntimePack>@(RuntimePack->WithMetadataValue('FrameworkName', 'Microsoft.NETCore.App')->'$(NuGetPackageRoot)%(NuGetPackageId)/%(NuGetPackageVersion)')</NetCoreRuntimePack>
+      <DesktopRuntimePack>@(RuntimePack->WithMetadataValue('FrameworkName', 'Microsoft.WindowsDesktop.App')->'$(NuGetPackageRoot)%(NuGetPackageId)/%(NuGetPackageVersion)')</DesktopRuntimePack>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(NetCoreRuntimePack)/THIRD-PARTY-NOTICES.TXT') Or !Exists('$(DesktopRuntimePack)/LICENSE')" Text="The .NET runtime pack license files were not found." />
+    <ItemGroup>
+      <Content Include="$(NetCoreRuntimePack)/LICENSE.TXT" Link="licenses/dotnet-runtime-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <Content Include="$(NetCoreRuntimePack)/THIRD-PARTY-NOTICES.TXT" Link="licenses/dotnet-runtime-THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <Content Include="$(DesktopRuntimePack)/LICENSE" Link="licenses/windowsdesktop-runtime-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+</Project>

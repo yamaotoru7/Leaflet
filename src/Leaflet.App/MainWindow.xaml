@@ -1,0 +1,151 @@
+<Window x:Class="Leaflet.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:Leaflet.App.Controls"
+        Title="Leaflet" Width="1600" Height="1000"
+        Icon="Assets/Leaflet.ico"
+        WindowStartupLocation="CenterScreen"
+        AllowDrop="True" UseLayoutRounding="True"
+        FontFamily="Yu Gothic UI" FontSize="12">
+    <Grid x:Name="RootGrid">
+    <DockPanel x:Name="RootDock">
+        <Menu x:Name="MainMenu" DockPanel.Dock="Top">
+            <MenuItem Header="ファイル(_F)">
+                <MenuItem Header="開く(_O)..." InputGestureText="Ctrl+O" Click="Open_Click" />
+                <MenuItem Header="閉じる(_C)" InputGestureText="Esc" Click="CloseImage_Click" />
+                <MenuItem x:Name="RecentMenu" Header="最近開いた書庫(_R)" SubmenuOpened="RecentMenu_SubmenuOpened">
+                    <MenuItem Header="(なし)" IsEnabled="False" />
+                </MenuItem>
+                <Separator />
+                <MenuItem Header="終了(_X)" Click="Exit_Click" />
+            </MenuItem>
+            <MenuItem Header="移動(_M)">
+                <MenuItem Header="次の見開き" InputGestureText="↓" Click="NextSpread_Click" />
+                <MenuItem Header="前の見開き" InputGestureText="↑" Click="PreviousSpread_Click" />
+                <MenuItem Header="1 ページ進む" InputGestureText="← (右綴じ)" Click="StepForward_Click" />
+                <MenuItem Header="1 ページ戻る" InputGestureText="→ (右綴じ)" Click="StepBack_Click" />
+                <MenuItem Header="最初のページ" InputGestureText="Home" Click="FirstPage_Click" />
+                <MenuItem Header="最後のページ" InputGestureText="End" Click="LastPage_Click" />
+                <Separator />
+                <MenuItem Header="次の書庫" InputGestureText="Ctrl+↓" Click="NextBook_Click" />
+                <MenuItem Header="前の書庫" InputGestureText="Ctrl+↑" Click="PreviousBook_Click" />
+            </MenuItem>
+            <MenuItem x:Name="ImageMenuRoot" Header="イメージ(_I)" SubmenuOpened="ImageMenuRoot_SubmenuOpened">
+                <MenuItem Header="(読み込み中)" />
+            </MenuItem>
+            <MenuItem x:Name="BookmarkMenu" Header="ブックマーク(_B)" SubmenuOpened="BookmarkMenu_SubmenuOpened">
+                <MenuItem Header="(読み込み中)" />
+            </MenuItem>
+            <MenuItem Header="表示(_V)">
+                <MenuItem Header="全画面表示" InputGestureText="Enter" Click="FullScreen_Click" />
+            </MenuItem>
+            <MenuItem Header="ヘルプ(_H)">
+                <MenuItem x:Name="CheckUpdateMenu" Header="更新を確認(_U)..." Click="CheckUpdate_Click" />
+                <MenuItem Header="リリースページを開く(_R)" Click="ReleasesPage_Click" />
+                <Separator />
+                <MenuItem Header="Leaflet について(_A)" Click="About_Click" />
+            </MenuItem>
+            <!-- Shown when a newer release is found. -->
+            <MenuItem x:Name="UpdateAvailableMenu" Visibility="Collapsed" FontWeight="SemiBold"
+                      Foreground="#0B7A55" Click="UpdateAvailable_Click" />
+        </Menu>
+
+        <DockPanel x:Name="AddressPanel" DockPanel.Dock="Top" Margin="2">
+            <TextBlock DockPanel.Dock="Left" Text="アドレス" VerticalAlignment="Center" Margin="2,0,6,0" />
+            <TextBox x:Name="AddressBox" KeyDown="AddressBox_KeyDown" VerticalContentAlignment="Center" />
+        </DockPanel>
+
+        <StatusBar x:Name="StatusPanel" DockPanel.Dock="Bottom">
+            <StatusBar.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <DockPanel LastChildFill="True" />
+                </ItemsPanelTemplate>
+            </StatusBar.ItemsPanel>
+            <StatusBarItem DockPanel.Dock="Right" Width="140">
+                <TextBlock x:Name="PageStatus" />
+            </StatusBarItem>
+            <StatusBarItem DockPanel.Dock="Right" Width="100">
+                <TextBlock x:Name="SizeStatus" />
+            </StatusBarItem>
+            <StatusBarItem>
+                <TextBlock x:Name="StatusText" TextTrimming="CharacterEllipsis" />
+            </StatusBarItem>
+        </StatusBar>
+
+        <Grid x:Name="BodyGrid">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="LeftColumn" Width="460" />
+                <ColumnDefinition x:Name="SplitterColumn" Width="4" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Grid x:Name="LeftPane" Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition x:Name="TreeRow" Height="3*" MinHeight="60" />
+                    <RowDefinition Height="4" />
+                    <RowDefinition x:Name="ListRow" Height="2*" MinHeight="60" />
+                </Grid.RowDefinitions>
+                <DockPanel Grid.Row="0">
+                    <TextBlock DockPanel.Dock="Top" Text="フォルダ" Margin="4,2" />
+                    <TreeView x:Name="FolderTree" SelectedItemChanged="FolderTree_SelectedItemChanged">
+                        <TreeView.ItemContainerStyle>
+                            <Style TargetType="TreeViewItem">
+                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                                <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+                                <EventSetter Event="Selected" Handler="FolderTreeItem_Selected" />
+                            </Style>
+                        </TreeView.ItemContainerStyle>
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <StackPanel Orientation="Horizontal">
+                                    <Image Source="{Binding Icon}" Width="16" Height="16" Margin="0,0,4,0" />
+                                    <TextBlock Text="{Binding Name}" />
+                                </StackPanel>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </DockPanel>
+                <GridSplitter Grid.Row="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Rows" />
+                <ListView x:Name="FileList" Grid.Row="2" SelectionMode="Extended"
+                          PreviewMouseLeftButtonUp="FileList_PreviewMouseLeftButtonUp" KeyUp="FileList_KeyUp">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsShown}" Value="True">
+                                    <Setter Property="Foreground" Value="Red" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.View>
+                        <GridView>
+                            <GridViewColumn Header="名前" Width="160" DisplayMemberBinding="{Binding Name}" />
+                            <GridViewColumn Header="サイズ" Width="80">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding SizeText}" TextAlignment="Right" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="種類" Width="90" DisplayMemberBinding="{Binding TypeText}" />
+                            <GridViewColumn Header="更新日時" Width="120" DisplayMemberBinding="{Binding DateText}" />
+                        </GridView>
+                    </ListView.View>
+                </ListView>
+            </Grid>
+
+            <GridSplitter x:Name="MainSplitter" Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns" />
+
+            <controls:SpreadView x:Name="Viewer" Grid.Column="2"
+                                 MouseWheel="Viewer_MouseWheel"
+                                 MouseDown="Viewer_MouseDown"
+                                 ContextMenuOpening="Viewer_ContextMenuOpening">
+                <controls:SpreadView.ContextMenu>
+                    <ContextMenu />
+                </controls:SpreadView.ContextMenu>
+            </controls:SpreadView>
+        </Grid>
+    </DockPanel>
+    </Grid>
+</Window>
