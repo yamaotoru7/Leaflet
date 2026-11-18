@@ -4,7 +4,7 @@
 ; 設定と読んだ位置（%LocalAppData%\Leaflet\settings.json）はアンインストールでも消さない。
 
 #ifndef AppVersion
-  #define AppVersion "0.1.1"
+  #define AppVersion "0.1.2"
 #endif
 #ifndef PublishDir
   #define PublishDir "..\.work\publish"

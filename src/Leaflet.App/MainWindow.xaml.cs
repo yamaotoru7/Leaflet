@@ -264,9 +264,13 @@ public partial class MainWindow : Window
             case NodeKind.Archive or NodeKind.ArchiveFolder:
                 await OpenAsync(node.Path, revealInTree: false);
                 break;
-            case NodeKind.Folder or NodeKind.Drive:
+            case NodeKind.Folder or NodeKind.Drive when node.Path.Length > 0:
                 // A folder is opened only when it holds images itself, as a book of those images.
-                if (await Task.Run(() => HasImages(node.Path))) await OpenAsync(node.Path, revealInTree: false);
+                // Any other folder closes the book that is open, so its image does not stay on screen.
+                var hasImages = await Task.Run(() => HasImages(node.Path));
+                if (!ReferenceEquals(FolderTree.SelectedItem, node)) return;  // another node was picked meanwhile
+                if (hasImages) await OpenAsync(node.Path, revealInTree: false);
+                else CloseBook(node.Path);
                 break;
         }
     }
@@ -474,6 +478,12 @@ public partial class MainWindow : Window
         AddressBox.Text = folder.Length == 0 ? _cache!.Book.Path : Path.Combine(_cache!.Book.Path, folder);
         FileList.ScrollIntoView(_items[spread.Last]);
         FileList.ScrollIntoView(_items[spread.First]);
+        // While the list has the focus, its selection follows the spread on screen.
+        if (FileList.IsKeyboardFocusWithin)
+        {
+            SelectShownFiles();
+            FocusSelectedFile();
+        }
 
         var size = _items.Skip(spread.First).Take(spread.Count).Sum(i => i.Size);
         SizeStatus.Text = $"{(size + 1023) / 1024:N0} KB";
@@ -530,6 +540,14 @@ public partial class MainWindow : Window
         // An open menu uses the arrow keys and Enter itself.
         if (Keyboard.FocusedElement is MenuItem || MainMenu.IsKeyboardFocusWithin) return;
 
+        // Tab and Shift+Tab move only between the address bar, the tree, the list and the image.
+        if (key == Key.Tab && Keyboard.Modifiers is ModifierKeys.None or ModifierKeys.Shift)
+        {
+            e.Handled = true;
+            MoveFocus(forward: Keyboard.Modifiers == ModifierKeys.None);
+            return;
+        }
+
         if (ctrl && key == Key.O)
         {
             e.Handled = true;
@@ -555,10 +573,12 @@ public partial class MainWindow : Window
             return;
         }
         // Leeyes: Esc (and Ctrl+F4) closes the image (the book stays open in the list).
+        // Esc with no image on screen quits the app.
         if ((key == Key.Escape && Keyboard.Modifiers == ModifierKeys.None) || (ctrl && key == Key.F4))
         {
             e.Handled = true;
-            CloseImage();
+            if (key == Key.Escape && (_cache is null || _imageClosed)) Close();
+            else CloseImage();
             return;
         }
 
@@ -579,6 +599,15 @@ public partial class MainWindow : Window
             return;
         }
 
+        // In the list with the image shown, ↑ and ↓ move by spread (the selection follows the spread).
+        if (FileList.IsKeyboardFocusWithin && !_imageClosed && _cache is not null
+            && Keyboard.Modifiers == ModifierKeys.None && key is Key.Down or Key.Up)
+        {
+            e.Handled = true;
+            await (key == Key.Down ? NextSpread() : PreviousSpread());
+            return;
+        }
+
         // The address bar, the tree and the list use the arrow keys themselves.
         if (AddressBox.IsKeyboardFocusWithin || FolderTree.IsKeyboardFocusWithin || FileList.IsKeyboardFocusWithin) return;
 
@@ -595,6 +624,82 @@ public partial class MainWindow : Window
         if (action is null || ctrl) return;
         e.Handled = true;
         await action();
+    }
+
+    /// <summary>The places Tab goes round, in order.</summary>
+    private FrameworkElement[] FocusStops => [AddressBox, FolderTree, FileList, Viewer];
+
+    private void MoveFocus(bool forward)
+    {
+        var stops = FocusStops;
+        var current = Array.FindIndex(stops, s => s.IsKeyboardFocusWithin);
+        for (var step = 1; step <= stops.Length; step++)
+        {
+            // From outside the stops (nothing focused), Tab starts at the first and Shift+Tab at the last.
+            var index = current < 0
+                ? (forward ? step - 1 : stops.Length - step)
+                : ((current + (forward ? step : -step)) % stops.Length + stops.Length) % stops.Length;
+            var stop = stops[index];
+            if (stop.IsVisible && stop.IsEnabled && FocusInside(stop)) return;
+        }
+    }
+
+    /// <summary>Focuses the selected item of the tree or the list (so the arrow keys go on from it), or the element itself.</summary>
+    private bool FocusInside(FrameworkElement stop)
+    {
+        if (stop == FileList) SelectShownFiles();
+        Control? container = stop switch
+        {
+            TreeView tree when tree.SelectedItem is TreeNode node => FindTreeItem(tree, node),
+            ListView list when list.SelectedItem is { } item => list.ItemContainerGenerator.ContainerFromItem(item) as ListViewItem,
+            _ => null,
+        };
+        if (container is not null && container.Focus()) return true;
+        if (stop is TextBox box)
+        {
+            box.Focus();
+            box.SelectAll();
+            return box.IsKeyboardFocusWithin;
+        }
+        return stop.Focus() || stop.IsKeyboardFocusWithin;
+    }
+
+    /// <summary>
+    /// Selects the files of the spread on screen, so that the list picks up from the current page.
+    /// With the image closed, the selection made by <see cref="CloseImage"/> (or moved since) is kept.
+    /// </summary>
+    private void SelectShownFiles()
+    {
+        if (_cache is null || _imageClosed || _items.Count == 0) return;
+        var shown = _items.Skip(_spread.First).Take(_spread.Count).ToList();
+        if (shown.Count == 0) return;
+        FileList.SelectedItems.Clear();
+        foreach (var item in shown) FileList.SelectedItems.Add(item);
+        FileList.ScrollIntoView(shown[0]);
+        FileList.UpdateLayout();  // so that the container of the first file exists to take the focus
+    }
+
+    /// <summary>Puts the focus on the (first) selected file, where the arrow keys go on from.</summary>
+    private void FocusSelectedFile()
+    {
+        if (FileList.SelectedItem is { } item && FileList.ItemContainerGenerator.ContainerFromItem(item) is ListViewItem container)
+        {
+            container.Focus();
+        }
+    }
+
+    private static TreeViewItem? FindTreeItem(ItemsControl parent, TreeNode node)
+    {
+        // The path from the root to the node, then down the generated containers.
+        var chain = new Stack<TreeNode>();
+        for (var n = node; n is not null; n = n.Parent) chain.Push(n);
+        ItemsControl current = parent;
+        while (chain.Count > 0)
+        {
+            if (current.ItemContainerGenerator.ContainerFromItem(chain.Pop()) is not TreeViewItem item) return null;
+            current = item;
+        }
+        return current as TreeViewItem;
     }
 
     private async void Viewer_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -620,10 +725,58 @@ public partial class MainWindow : Window
     {
         if (FileList.SelectedItem is not PageItem item) return;
         // With the image closed the arrow keys only move the selection; Enter shows the image again.
+        // (With the image shown, ↑ and ↓ move by spread in OnPreviewKeyDown.)
         // (With the image shown, Enter toggles full screen in OnPreviewKeyDown instead.)
         var opens = (e.Key == Key.Enter && _imageClosed)
-            || (!_imageClosed && e.Key is Key.Up or Key.Down or Key.PageUp or Key.PageDown or Key.Home or Key.End);
+            || (!_imageClosed && e.Key is Key.PageUp or Key.PageDown or Key.Home or Key.End);
         if (opens) await GoToPage(item.Index);
+    }
+
+    // ---- File list columns -------------------------------------------------------------------
+    //
+    // The name column takes the width the other columns leave, so that the list does not scroll
+    // sideways while there is room. Only when the pane is narrower than the other columns plus a
+    // minimum name width does the horizontal scroll bar appear.
+
+    private const double MinNameWidth = 80;
+    private const double RowChrome = 10;  // borders and item padding around the columns
+    private bool _otherColumnsWatched;
+
+    private void FileList_SizeChanged(object sender, SizeChangedEventArgs e) => FitNameColumn();
+
+    private void FileList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        // The vertical scroll bar coming or going changes the room for the columns.
+        if (e.ViewportWidthChange != 0 || e.ExtentHeightChange != 0) FitNameColumn();
+    }
+
+    private void FitNameColumn()
+    {
+        if (FileList.View is not GridView view) return;
+        if (!_otherColumnsWatched)
+        {
+            // Widening another column by hand takes the room from the name column.
+            var width = System.ComponentModel.DependencyPropertyDescriptor.FromProperty(GridViewColumn.WidthProperty, typeof(GridViewColumn));
+            foreach (var column in view.Columns.Where(c => c != NameColumn)) width.AddValueChanged(column, (_, _) => FitNameColumn());
+            _otherColumnsWatched = true;
+        }
+        var scroller = FindChild<ScrollViewer>(FileList);
+        var room = (scroller?.ActualWidth ?? FileList.ActualWidth) - RowChrome;
+        if (scroller?.ComputedVerticalScrollBarVisibility == Visibility.Visible) room -= SystemParameters.VerticalScrollBarWidth;
+        var others = view.Columns.Where(c => c != NameColumn).Sum(c => double.IsNaN(c.Width) ? c.ActualWidth : c.Width);
+        var name = Math.Max(MinNameWidth, Math.Floor(room - others));
+        if (Math.Abs(NameColumn.Width - name) >= 1) NameColumn.Width = name;
+    }
+
+    private static T? FindChild<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T found) return found;
+            if (FindChild<T>(child) is { } deeper) return deeper;
+        }
+        return null;
     }
 
     private Task GoToPage(int index) =>
@@ -683,6 +836,27 @@ public partial class MainWindow : Window
         FileList.UpdateLayout();
         if (FileList.ItemContainerGenerator.ContainerFromItem(shown[0]) is ListViewItem container) container.Focus();
         else FileList.Focus();
+    }
+
+    /// <summary>
+    /// Closes the open book altogether: the image, the file list and the cache. The address shows
+    /// <paramref name="location"/>, the folder picked in the tree.
+    /// </summary>
+    private void CloseBook(string location)
+    {
+        if (_cache is null) return;
+        _cache.Dispose();
+        _cache = null;
+        _items = [];
+        FileList.ItemsSource = null;
+        _spread = default;
+        _imageClosed = false;
+        Viewer.Pages = [];
+        Title = "Leaflet";
+        AddressBox.Text = location;
+        SizeStatus.Text = "";
+        PageStatus.Text = "";
+        StatusText.Text = "";
     }
 
     private async void NextSpread_Click(object sender, RoutedEventArgs e) => await NextSpread();
