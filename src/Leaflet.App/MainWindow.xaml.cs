@@ -566,10 +566,12 @@ public partial class MainWindow : Window
             ToggleFullScreen();
             return;
         }
+        // Esc in full screen goes back to the window with the image closed (the list has the focus).
         if (key == Key.Escape && _isFullScreen)
         {
             e.Handled = true;
             ToggleFullScreen();
+            CloseImage();
             return;
         }
         // Leeyes: Esc (and Ctrl+F4) closes the image (the book stays open in the list).
