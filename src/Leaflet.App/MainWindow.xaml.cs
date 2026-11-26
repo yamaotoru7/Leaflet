@@ -2,6 +2,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Leaflet.App.Imaging;
@@ -82,6 +83,36 @@ public partial class MainWindow : Window
         Drop += OnDrop;
         Viewer.Rendered += (_, _) => UpdateTitle();
         Closed += (_, _) => _cache?.Dispose();
+        SourceInitialized += (_, _) => HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(WndProc);
+        // A drive can come or go while the window is not looking (e.g. a network drive mapped elsewhere).
+        Activated += (_, _) =>
+        {
+            if (_tree.Roots.Count > 0 && _tree.DrivesChanged()) _ = _tree.RefreshDrivesAsync();
+        };
+    }
+
+    private const int WM_DEVICECHANGE = 0x0219;
+
+    private DispatcherTimer? _driveTimer;
+
+    /// <summary>A drive or a disc was added or removed: list the drives once the burst of messages settles.</summary>
+    private nint WndProc(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
+    {
+        if (msg == WM_DEVICECHANGE && _tree.Roots.Count > 0)
+        {
+            if (_driveTimer is null)
+            {
+                _driveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                _driveTimer.Tick += (_, _) =>
+                {
+                    _driveTimer.Stop();
+                    _ = _tree.RefreshDrivesAsync();
+                };
+            }
+            _driveTimer.Stop();
+            _driveTimer.Start();
+        }
+        return 0;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -278,6 +309,34 @@ public partial class MainWindow : Window
     private void FolderTreeItem_Selected(object sender, RoutedEventArgs e)
     {
         if (e.OriginalSource is TreeViewItem item) item.BringIntoView();
+    }
+
+    /// <summary>
+    /// F5: lists the selected folder again (with the expanded folders under it) and the drives.
+    /// For a node inside an archive, or a folder that is gone, the nearest folder above it is listed.
+    /// With nothing selected, every expanded root is listed.
+    /// </summary>
+    private async Task RefreshTreeAsync()
+    {
+        var refreshing = _tree.RefreshDrivesAsync();
+        var node = FolderTree.SelectedItem as TreeNode;
+        // Directory.Exists can be slow on a share that is gone: ask in the background.
+        while (node is not null && (node.Kind is NodeKind.Archive or NodeKind.ArchiveFolder || !await Task.Run(() => Directory.Exists(node.Path))))
+        {
+            node = node.Parent;
+        }
+        if (node is not null)
+        {
+            await node.RefreshExpandedAsync();
+        }
+        else
+        {
+            foreach (var root in _tree.Roots.ToList())
+            {
+                if (root.IsExpanded) await root.RefreshExpandedAsync();
+            }
+        }
+        await refreshing;
     }
 
     private static bool HasImages(string folder)
@@ -558,6 +617,12 @@ public partial class MainWindow : Window
         {
             e.Handled = true;
             AddBookmark();
+            return;
+        }
+        if (key == Key.F5 && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            e.Handled = true;
+            await RefreshTreeAsync();
             return;
         }
         if (key == Key.F11)

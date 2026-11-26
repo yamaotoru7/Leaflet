@@ -21,6 +21,15 @@ public sealed partial class FolderTreeModel
 
     public ObservableCollection<TreeNode> Roots { get; } = [];
 
+    /// <summary>The known folders come first in Roots; the drives follow them.</summary>
+    private int _knownCount;
+
+    /// <summary>The drive letters the tree shows, to tell cheaply whether they have changed.</summary>
+    private string[] _driveNames = [];
+
+    private Task? _refreshingDrives;
+    private bool _drivesPending;
+
     /// <summary>Lists the drives. Names are read in the background because a disconnected network drive can be slow.</summary>
     public async Task LoadDrivesAsync()
     {
@@ -33,15 +42,71 @@ public sealed partial class FolderTreeModel
             .ToList());
         foreach (var (path, display, icon) in folders)
         {
-            Roots.Add(new TreeNode(display, path, NodeKind.Folder, null, icon));
+            Roots.Insert(_knownCount++, new TreeNode(display, path, NodeKind.Folder, null, icon));
         }
+        await RefreshDrivesAsync();
+    }
 
+    /// <summary>Whether drives have been added or removed since the tree last listed them (cheap).</summary>
+    public bool DrivesChanged()
+    {
+        try
+        {
+            return !Environment.GetLogicalDrives().SequenceEqual(_driveNames, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Brings the drives in the tree in line with the drives there are now. A drive whose name has changed
+    /// (other media in the same drive) is replaced; the others keep what is expanded under them.
+    /// Calls made while a listing runs are folded into one more listing after it.
+    /// </summary>
+    public Task RefreshDrivesAsync()
+    {
+        if (_refreshingDrives is { IsCompleted: false })
+        {
+            _drivesPending = true;
+            return _refreshingDrives;
+        }
+        return _refreshingDrives = RefreshDrivesLoopAsync();
+    }
+
+    private async Task RefreshDrivesLoopAsync()
+    {
+        do
+        {
+            _drivesPending = false;
+            await ListDrivesAsync();
+        }
+        while (_drivesPending);
+    }
+
+    private async Task ListDrivesAsync()
+    {
         var drives = await Task.Run(() => DriveInfo.GetDrives()
             .Select(d => (d.Name, Display: ShellInfo.DisplayName(d.Name), Icon: ShellInfo.IconOf(d.Name)))
             .ToList());
-        foreach (var (path, display, icon) in drives)
+        _driveNames = drives.Select(d => d.Name).ToArray();
+
+        var existing = Roots.Where(r => r.Kind == NodeKind.Drive).ToList();
+        var wanted = drives
+            .Select(d => existing.FirstOrDefault(r => string.Equals(r.Path, d.Name, StringComparison.OrdinalIgnoreCase) && r.Name == d.Display)
+                ?? new TreeNode(d.Display, d.Name, NodeKind.Drive, null, d.Icon))
+            .ToList();
+        foreach (var gone in existing.Except(wanted))
         {
-            Roots.Add(new TreeNode(display, path, NodeKind.Drive, null, icon));
+            Roots.Remove(gone);
+            gone.Detach();
+        }
+        for (var i = 0; i < wanted.Count; i++)
+        {
+            var at = Roots.IndexOf(wanted[i]);
+            if (at < 0) Roots.Insert(_knownCount + i, wanted[i]);
+            else if (at != _knownCount + i) Roots.Move(at, _knownCount + i);
         }
     }
 
