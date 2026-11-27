@@ -10,6 +10,7 @@ using Leaflet.App.Tree;
 using Leaflet.App.Updates;
 using Leaflet.Core.Updates;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using Leaflet.Core.Books;
 using Leaflet.Core.Settings;
 using Leaflet.Core.Viewing;
@@ -772,6 +773,9 @@ public partial class MainWindow : Window
     private async void Viewer_MouseWheel(object sender, MouseWheelEventArgs e)
     {
         e.Handled = true;
+        // Turning pages with the wheel makes the image the focus, so the arrow keys turn pages next
+        // (not move the selection in the tree or the list the focus was in).
+        if (!Viewer.IsKeyboardFocused) Viewer.Focus();
         _wheelDelta += e.Delta;
         while (Math.Abs(_wheelDelta) >= Mouse.MouseWheelDeltaForOneLine)
         {
@@ -1108,7 +1112,12 @@ public partial class MainWindow : Window
             MainMenu.VerticalAlignment = VerticalAlignment.Top;
             Panel.SetZIndex(MainMenu, 1);
             RootGrid.Children.Add(MainMenu);
-            ShowMenuForAWhile();
+            // Full screen starts with the menu hidden; a real mouse move shows it. The cursor's place on
+            // the screen now is the start, so the "move" WPF reports when the window grows under a still
+            // mouse does not count. (The window may not have moved yet, so ask the screen, not the window.)
+            _menuTimer?.Stop();
+            MainMenu.Visibility = Visibility.Collapsed;
+            _lastMousePosition = GetCursorPos(out var cursor) ? new Point(cursor.X, cursor.Y) : null;
         }
         else
         {
@@ -1151,6 +1160,17 @@ public partial class MainWindow : Window
         _lastMousePosition = position;
         ShowMenuForAWhile();
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetCursorPos(out NativePoint point);
 
     /// <summary>Keys that turn pages (or modifiers on their own) leave the menu hidden.</summary>
     private static bool IsPageKey(Key key) => key is Key.Up or Key.Down or Key.Left or Key.Right
